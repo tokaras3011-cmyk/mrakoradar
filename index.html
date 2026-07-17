@@ -1,0 +1,1076 @@
+<!doctype html>
+<html lang="cs">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>MrakoRadar — prototyp</title>
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#0b1220">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<style>
+  :root {
+    --bg: #0b1220;
+    --panel: rgba(22, 32, 52, 0.92);
+    --text: #e8eef7;
+    --muted: #93a3bc;
+    --accent: #4fc3f7;
+    --r1: #64b5f6;  /* slabý */
+    --r2: #26a69a;  /* mírný */
+    --r3: #ffb300;  /* silný */
+    --r4: #ef5350;  /* přívalový */
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: linear-gradient(180deg, #0b1220 0%, #101a2e 100%);
+    color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    min-height: 100vh;
+  }
+  #cam {
+    position: fixed; inset: 0; width: 100%; height: 100%;
+    object-fit: cover; z-index: 0; display: none;
+  }
+  body.ar #cam { display: block; }
+  body.ar.ar-nocam #cam { display: none; }
+  body.ar .app { display: none; }
+
+  /* --- AR HUD --- */
+  #hud { display: none; position: fixed; inset: 0; z-index: 2; pointer-events: none; }
+  body.ar #hud { display: block; }
+  #arCanvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .hud-top {
+    position: absolute; top: 0; left: 0; right: 0;
+    display: flex; justify-content: space-between; align-items: center;
+    padding: calc(10px + env(safe-area-inset-top)) 14px 14px;
+    font-size: 0.85rem; color: #fff; text-shadow: 0 1px 3px rgba(0,0,0,0.9);
+    background: linear-gradient(180deg, rgba(0,0,0,0.5), transparent);
+  }
+  .mark {
+    position: absolute; transform: translate(-50%, -50%);
+    background: rgba(8, 12, 22, 0.66); border: 1px solid rgba(255,255,255,0.3);
+    border-radius: 10px; padding: 6px 10px; font-size: 0.72rem; color: #dbe6f5;
+    white-space: nowrap; backdrop-filter: blur(2px); text-align: center;
+  }
+  .mark b { display: block; font-size: 0.85rem; color: #fff; }
+  .mark .trend { display: block; margin-top: 3px; font-size: 0.68rem; }
+  .mark .trend.approach { color: #ff8a65; }
+  .mark .trend.recede { color: #81c784; }
+  .mark .trend.stable { color: #c4d2e6; }
+  .mark .trend.forming { color: #ffd54f; }
+  .hud-bottom {
+    position: absolute; left: 0; right: 0; bottom: 0;
+    display: flex; justify-content: space-between; align-items: flex-end; gap: 10px;
+    padding: 16px 14px calc(14px + env(safe-area-inset-bottom));
+    background: linear-gradient(0deg, rgba(0,0,0,0.6), transparent);
+    color: #fff; text-shadow: 0 1px 3px rgba(0,0,0,0.9);
+  }
+  .hud-bottom .info { font-size: 0.85rem; line-height: 1.45; min-width: 0; }
+  .hud-bottom .info .small { font-size: 0.75rem; color: #c4d2e6; }
+  #hudExit {
+    pointer-events: auto; flex: 0 0 auto;
+    background: rgba(8,12,22,0.7); border: 1px solid rgba(255,255,255,0.35);
+    color: #fff; border-radius: 10px; padding: 10px 14px; font-size: 0.85rem;
+  }
+  #cloudTag {
+    position: absolute; display: none;
+    border: 2px dashed rgba(255,255,255,0.55); border-radius: 16px;
+  }
+  #cloudTag span {
+    position: absolute; top: -6px; left: 10px; transform: translateY(-100%);
+    background: rgba(8,12,22,0.72); border: 1px solid rgba(255,255,255,0.3);
+    border-radius: 8px; padding: 3px 9px; font-size: 0.78rem; color: #fff;
+    white-space: nowrap;
+  }
+  .app { position: relative; z-index: 1; max-width: 480px; margin: 0 auto; padding: 12px 12px 24px; }
+  header { display: flex; align-items: baseline; justify-content: space-between; padding: 4px 4px 10px; }
+  h1 { font-size: 1.15rem; font-weight: 700; }
+  .tag { font-size: 0.65rem; font-weight: 600; color: var(--accent); border: 1px solid var(--accent); border-radius: 99px; padding: 1px 8px; vertical-align: middle; }
+  .card { background: var(--panel); border-radius: 14px; padding: 14px; margin-bottom: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.35); }
+  .muted { color: var(--muted); }
+  .small { font-size: 0.78rem; }
+  .dir { font-size: 0.85rem; color: var(--muted); margin-bottom: 4px; }
+  .big { font-size: 1.25rem; font-weight: 700; line-height: 1.35; }
+  .big .cat-r1 { color: var(--r1); } .big .cat-r2 { color: var(--r2); }
+  .big .cat-r3 { color: var(--r3); } .big .cat-r4 { color: var(--r4); }
+  .big .cat-none { color: #81c784; }
+  #beam { width: 100%; height: 120px; display: block; }
+  .center { display: flex; flex-direction: column; align-items: center; }
+  #map { border-radius: 10px; max-width: 100%; }
+  .controls label { display: block; font-size: 0.85rem; color: var(--muted); }
+  .controls input[type=range] { width: 100%; margin: 8px 0 12px; accent-color: var(--accent); }
+  .row { display: flex; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
+  button {
+    background: #1d2b47; color: var(--text); border: 1px solid #31456d;
+    border-radius: 10px; padding: 9px 12px; font-size: 0.85rem; cursor: pointer; flex: 1;
+    white-space: nowrap;
+  }
+  button:active { background: #27395e; }
+  button.on { border-color: var(--accent); color: var(--accent); }
+  input[type=number] {
+    background: #101a2e; color: var(--text); border: 1px solid #31456d;
+    border-radius: 10px; padding: 9px 10px; font-size: 0.85rem; width: 0; flex: 1;
+  }
+  footer { padding: 6px 4px; }
+  #segList { margin-top: 6px; }
+</style>
+</head>
+<body>
+<video id="cam" playsinline muted autoplay></video>
+<div id="hud">
+  <canvas id="arCanvas"></canvas>
+  <div class="hud-top">
+    <div id="hudHead">—</div>
+    <div id="hudRadarT">radar: —</div>
+  </div>
+  <div id="hudMarks"></div>
+  <div id="cloudTag"><span></span></div>
+  <div class="hud-bottom">
+    <div class="info">
+      <div id="hudCloud">Oblačnost: analyzuji…</div>
+      <div id="hudRain" class="small"></div>
+    </div>
+    <button id="hudExit">✕ Zavřít</button>
+  </div>
+</div>
+<div class="app">
+  <header>
+    <h1>☁️ MrakoRadar <span class="tag">prototyp</span></h1>
+    <div id="radarTime" class="muted small">radar: —</div>
+  </header>
+
+  <section class="card">
+    <div id="dirLine" class="dir">Azimut —</div>
+    <div id="mainMsg" class="big">Načítám radar…</div>
+    <div id="subMsg" class="muted small" style="margin-top:6px"></div>
+  </section>
+
+  <section class="card">
+    <canvas id="beam"></canvas>
+    <div id="segList" class="muted small"></div>
+  </section>
+
+  <section class="card center">
+    <canvas id="map" width="340" height="340"></canvas>
+    <div class="muted small" style="margin-top:8px">Mapa: sever nahoře · kružnice po 20 km · výseč = směr pohledu</div>
+  </section>
+
+  <section class="card controls">
+    <label>Azimut pohledu: <b id="azVal" style="color:var(--text)">0° (S)</b>
+      <input type="range" id="azSlider" min="0" max="359" value="0">
+    </label>
+    <div class="row">
+      <button id="btnCompass">🧭 Kompas</button>
+      <button id="btnGPS">📍 GPS</button>
+      <button id="btnCam">📷 AR režim</button>
+      <button id="btnRefresh">🔄 Radar</button>
+    </div>
+    <div class="row">
+      <input id="lat" type="number" step="0.0001" placeholder="zem. šířka">
+      <input id="lon" type="number" step="0.0001" placeholder="zem. délka">
+      <button id="btnSetPos" style="flex:0 1 auto">Nastavit</button>
+    </div>
+    <div id="status" class="muted small"></div>
+  </section>
+
+  <footer class="muted small">Data: RainViewer (globální radarový kompozit, krok ~10 min). Odhad intenzity z odrazivosti (Marshall–Palmer). Prototyp — přesnost směru závisí na kalibraci kompasu telefonu.</footer>
+</div>
+
+<script>
+"use strict";
+
+// ---------- stav ----------
+const S = {
+  lat: 50.0755, lon: 14.4378,   // výchozí: Praha (než uživatel dá GPS)
+  az: 0,
+  zoom: 7,   // RainViewer servíruje barevné palety max. do zoomu 7
+
+  host: null, framePath: null, frameTs: null,
+  trendFramePath: null, trendFrameTs: null,   // starší snímek pro odhad pohybu srážek (nowcasting)
+  maxKm: 80, stepKm: 0.5,
+  compassOn: false,
+  camElev: null,   // elevace kamery nad horizontem (°), null = neznámá
+};
+const grayTiles = new Map();   // klíč z/x/y -> Promise<ImageData|null>
+const colorTiles = new Map();  // klíč vrstva/z/x/y -> Promise<ImageBitmap|null>
+let scanSeq = 0;
+
+const $ = id => document.getElementById(id);
+const czNum = (v, d=1) => v.toLocaleString("cs-CZ", { maximumFractionDigits: d, minimumFractionDigits: d });
+
+// ---------- geometrie ----------
+const R_EARTH = 6371;
+function destPoint(lat, lon, bearingDeg, distKm) {
+  const br = bearingDeg * Math.PI / 180;
+  const la1 = lat * Math.PI / 180, lo1 = lon * Math.PI / 180, dR = distKm / R_EARTH;
+  const la2 = Math.asin(Math.sin(la1) * Math.cos(dR) + Math.cos(la1) * Math.sin(dR) * Math.cos(br));
+  const lo2 = lo1 + Math.atan2(Math.sin(br) * Math.sin(dR) * Math.cos(la1),
+                               Math.cos(dR) - Math.sin(la1) * Math.sin(la2));
+  return [la2 * 180 / Math.PI, ((lo2 * 180 / Math.PI) + 540) % 360 - 180];
+}
+// světové pixely webové mercatorové projekce (256px dlaždice)
+function worldPx(lat, lon, z) {
+  const n = Math.pow(2, z) * 256;
+  const x = (lon + 180) / 360 * n;
+  const latR = Math.max(-85.05, Math.min(85.05, lat)) * Math.PI / 180;
+  const y = (1 - Math.log(Math.tan(latR) + 1 / Math.cos(latR)) / Math.PI) / 2 * n;
+  return { x, y };
+}
+function metersPerPixel(lat, z) {
+  return 156543.03392 * Math.cos(lat * Math.PI / 180) / Math.pow(2, z);
+}
+const DIRS = ["S","SSV","SV","VSV","V","VJV","JV","JJV","J","JJZ","JZ","ZJZ","Z","ZSZ","SZ","SSZ"];
+const dirName = az => DIRS[Math.round(((az % 360) + 360) % 360 / 22.5) % 16];
+
+// ---------- radar: metadata a dlaždice ----------
+async function loadRadarMeta() {
+  setStatus("Načítám metadata radaru…");
+  const r = await fetch("https://api.rainviewer.com/public/weather-maps.json");
+  if (!r.ok) throw new Error("weather-maps.json: HTTP " + r.status);
+  const j = await r.json();
+  const past = j.radar && j.radar.past;
+  if (!past || !past.length) throw new Error("radar: žádné snímky");
+  const last = past[past.length - 1];
+  S.host = j.host; S.framePath = last.path; S.frameTs = last.time;
+  // starší snímek ~25 min zpět — z rozdílu polohy srážek mezi snímky odhadujeme, jestli se blíží/vzdalují
+  if (past.length > 1) {
+    const targetT = last.time - 25 * 60;
+    let best = past[0];
+    for (const f of past) if (Math.abs(f.time - targetT) < Math.abs(best.time - targetT)) best = f;
+    if (best.path !== last.path) { S.trendFramePath = best.path; S.trendFrameTs = best.time; }
+    else { S.trendFramePath = null; S.trendFrameTs = null; }
+  } else { S.trendFramePath = null; S.trendFrameTs = null; }
+  grayTiles.clear();
+  for (const k of [...colorTiles.keys()]) if (k.startsWith("radar/")) colorTiles.delete(k);
+  $("radarTime").textContent = "radar: " + new Date(S.frameTs * 1000).toLocaleTimeString("cs-CZ", { hour: "2-digit", minute: "2-digit" });
+  setStatus("");
+}
+
+function dataTileUrl(framePath, z, x, y)  { return `${S.host}${framePath}/256/${z}/${x}/${y}/2/0_1.png`; }   // bez vyhlazení = přesné barvy palety (pro dekódování)
+function colorTileUrl(z, x, y) { return `${S.host}${S.framePath}/256/${z}/${x}/${y}/2/1_1.png`; }   // vyhlazené pro zobrazení na mapě
+function baseTileUrl(z, x, y)  { return `https://basemaps.cartocdn.com/rastertiles/voyager/${z}/${x}/${y}.png`; }
+
+// Oficiální paleta RainViewer "Universal Blue" (rainviewer.com/api/color-schemes.html),
+// RGBA hex pro dBZ od -10 výš; dekódujeme inverzním vyhledáním nejbližší barvy.
+const RAIN_HEX = ("63615914 66635a19 69665c1e 6c685d24 6f6b5f29 726e612e 75706234 78736439 7c75653e 7f786744 " +
+  "827b6949 857d6a4e 88806c54 8b826d59 8e856f5e 92887164 9e93756e aa9e7978 b6a97e82 c2b4828c " +
+  "cec08796 d2c48ba0 d6c88faa dacc93b4 ded097be 88ddeeff 6cd1ebff 51c5e8ff 36bae5ff 1baee2ff " +
+  "00a3e0ff 009ad5ff 0091caff 0088bfff 007fb4ff 0077aaff 0070a3ff 00699cff 006295ff 005b8eff " +
+  "005588ff 005180ff 004e78ff 004a70ff 004768ff ffee00ff ffe000ff ffd200ff ffc500ff ffb700ff " +
+  "ffaa00ff ff9f00ff ff9500ff ff8b00ff ff8100ff ff4400ff f23600ff e62800ff d91b00ff cd0d00ff " +
+  "c10000ff a80000ff 8f0000ff 760000ff 5d0000ff ffaaffff ff9fffff ff95ffff ff8bffff ff81ffff " +
+  "ff77ffff ff6cffff ff62ffff ff58ffff ff4effff ffffffff").split(" ");
+const SNOW_HEX = ("cfffff00 ceffff0c cdffff19 ccffff26 cbffff33 cbffff3f caffff4c c9ffff59 c8ffff66 c7ffff72 " +
+  "c7ffff7f c6ffff8c c5ffff99 c4ffffa5 c3ffffb2 c3ffffbf c2ffffcc c1ffffd8 c0ffffe5 bffffff2 " +
+  "bfffffff b8f8ffff b2f2ffff abebffff a5e5ffff 9fdfffff 98d8ffff 92d2ffff 8bcbffff 85c5ffff " +
+  "7fbfffff 78b8ffff 72b2ffff 6babffff 65a5ffff 5f9fffff 5b9bffff 5898ffff 5595ffff 5292ffff " +
+  "4f8fffff 4b8bffff 4888ffff 4585ffff 4282ffff 3f7fffff 3b7bffff 3878ffff 3575ffff 3272ffff " +
+  "2f6fffff 2b6bffff 2868ffff 2565ffff 2262ffff 1f5fffff 1b5bffff 1858ffff 1555ffff 1252ffff " +
+  "0f4fffff 0c4bffff 0948ffff 0645ffff 0242ffff 003fffff").split(" ");
+const PAL_START_DBZ = -10;
+const PALETTE = [];
+function addPal(hexArr, snow) {
+  hexArr.forEach((h, i) => {
+    const a = parseInt(h.slice(6, 8), 16);
+    if (a === 0) return;
+    PALETTE.push({
+      dbz: PAL_START_DBZ + i, snow,
+      r: parseInt(h.slice(0, 2), 16), g: parseInt(h.slice(2, 4), 16),
+      b: parseInt(h.slice(4, 6), 16), a,
+    });
+  });
+}
+addPal(RAIN_HEX, false);
+addPal(SNOW_HEX, true);
+function decodePixel(r, g, b, a) {
+  if (a < 10) return null;
+  let best = null, bestD = Infinity;
+  for (const p of PALETTE) {
+    const d = (p.r - r) ** 2 + (p.g - g) ** 2 + (p.b - b) ** 2 + ((p.a - a) / 2) ** 2;
+    if (d < bestD) { bestD = d; best = p; }
+  }
+  if (!best || bestD > 3000) return null;   // neznámá barva -> ignoruj
+  return { dbz: best.dbz, snow: best.snow };
+}
+
+function getDataTile(framePath, z, x, y) {
+  const key = `${framePath}|${z}/${x}/${y}`;
+  if (!grayTiles.has(key)) {
+    const p = (async () => {
+      try {
+        const r = await fetch(dataTileUrl(framePath, z, x, y));
+        if (!r.ok) return null;
+        const bmp = await createImageBitmap(await r.blob());
+        const c = document.createElement("canvas");
+        c.width = 256; c.height = 256;
+        const ctx = c.getContext("2d", { willReadFrequently: true });
+        ctx.drawImage(bmp, 0, 0);
+        return ctx.getImageData(0, 0, 256, 256);
+      } catch (e) { return null; }
+    })();
+    grayTiles.set(key, p);
+    p.then(v => { if (!v) grayTiles.delete(key); });   // selhání nekešovat, příště zkusit znovu
+  }
+  return grayTiles.get(key);
+}
+function getBitmapTile(kind, z, x, y) {
+  const key = `${kind}/${z}/${x}/${y}`;
+  if (!colorTiles.has(key)) {
+    const p = (async () => {
+      try {
+        const url = kind === "radar" ? colorTileUrl(z, x, y) : baseTileUrl(z, x, y);
+        const r = await fetch(url);
+        if (!r.ok) return null;
+        return await createImageBitmap(await r.blob());
+      } catch (e) { return null; }
+    })();
+    colorTiles.set(key, p);
+    p.then(v => { if (!v) colorTiles.delete(key); });
+  }
+  return colorTiles.get(key);
+}
+
+// ---------- vzorkování a intenzita ----------
+async function sampleEcho(lat, lon, framePath) {
+  framePath = framePath || S.framePath;
+  const z = S.zoom;
+  const p = worldPx(lat, lon, z);
+  const tx = Math.floor(p.x / 256), ty = Math.floor(p.y / 256);
+  const px = Math.floor(p.x - tx * 256), py = Math.floor(p.y - ty * 256);
+  const img = await getDataTile(framePath, z, tx, ty);
+  if (!img) return null;
+  const i = (py * 256 + px) * 4;
+  return decodePixel(img.data[i], img.data[i + 1], img.data[i + 2], img.data[i + 3]);
+}
+// Marshall–Palmer: Z = 200 * R^1.6 (dBZ nad 55 omezíme — bývá kontaminace kroupami)
+const dbzToRate = dbz => Math.pow(Math.pow(10, Math.min(dbz, 55) / 10) / 200, 1 / 1.6);
+function category(rate) {
+  if (rate < 0.1) return null;
+  if (rate < 1)  return { id: "r1", label: "slabý déšť" };
+  if (rate < 5)  return { id: "r2", label: "mírný déšť" };
+  if (rate < 15) return { id: "r3", label: "silný déšť" };
+  return { id: "r4", label: "přívalový déšť" };
+}
+const CAT_COLOR = { r1: "#64b5f6", r2: "#26a69a", r3: "#ffb300", r4: "#ef5350" };
+
+async function scanRay() {
+  const out = [];
+  const jobs = [];
+  for (let d = 1; d <= S.maxKm; d += S.stepKm) {
+    const [la, lo] = destPoint(S.lat, S.lon, S.az, d);
+    jobs.push(sampleEcho(la, lo).then(e => {
+      const rate = (e && e.dbz >= 10) ? dbzToRate(e.dbz) : 0;
+      return { d, dbz: e ? e.dbz : null, snow: !!(e && e.snow), rate };
+    }));
+  }
+  for (const j of jobs) out.push(await j);
+  return out;
+}
+// souvislé úseky deště (min. 2 vzorky = 1 km, aby se odfiltroval šum)
+function findSegments(samples) {
+  const segs = [];
+  let cur = null;
+  for (const s of samples) {
+    if (s.rate >= 0.1) {
+      if (!cur) cur = { from: s.d, to: s.d, maxRate: s.rate, snow: s.snow };
+      else { cur.to = s.d; cur.maxRate = Math.max(cur.maxRate, s.rate); cur.snow = cur.snow || s.snow; }
+    } else if (cur) {
+      if (cur.to - cur.from >= 0.5) segs.push(cur);
+      cur = null;
+    }
+  }
+  if (cur && cur.to - cur.from >= 0.5) segs.push(cur);
+  return segs;
+}
+
+// ---------- vykreslení ----------
+function drawBeam(samples, segs) {
+  const cv = $("beam");
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth, h = 120;
+  cv.width = w * dpr; cv.height = h * dpr;
+  const ctx = cv.getContext("2d");
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, w, h);
+
+  const padL = 18, padR = 8, plotW = w - padL - padR, base = h - 26;
+  const xOf = d => padL + d / S.maxKm * plotW;
+
+  // osa a rastr
+  ctx.strokeStyle = "rgba(147,163,188,0.25)";
+  ctx.fillStyle = "#93a3bc";
+  ctx.font = "11px system-ui";
+  ctx.textAlign = "center";
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(padL, base + 0.5); ctx.lineTo(w - padR, base + 0.5); ctx.stroke();
+  for (let km = 0; km <= S.maxKm; km += 20) {
+    const x = xOf(km);
+    ctx.beginPath(); ctx.moveTo(x, base); ctx.lineTo(x, base + 4); ctx.stroke();
+    ctx.fillText(km === 0 ? "vy" : km + " km", x, base + 16);
+  }
+  // pozorovatel
+  ctx.fillText("👁", padL, 14);
+
+  // sloupce intenzity
+  for (const s of samples) {
+    if (s.rate < 0.1) continue;
+    const cat = category(s.rate);
+    const frac = Math.min(1, Math.log10(1 + s.rate) / Math.log10(16)); // log škála do ~15 mm/h
+    const bh = 8 + frac * (base - 26);
+    ctx.fillStyle = s.snow ? "#e1f5fe" : CAT_COLOR[cat.id];
+    ctx.fillRect(xOf(s.d) - 1.4, base - bh, 2.8, bh);
+  }
+  // popisek nejbližšího úseku
+  if (segs.length) {
+    const x = xOf(segs[0].from);
+    ctx.fillStyle = "#e8eef7";
+    ctx.textAlign = x < w * 0.8 ? "left" : "right";
+    ctx.fillText(`${czNum(segs[0].from, 0)} km`, x + (x < w * 0.8 ? 4 : -4), 14);
+  }
+}
+
+async function drawMap() {
+  const cv = $("map"), size = 340, half = size / 2;
+  const ctx = cv.getContext("2d");
+  const BASE_Z = 8;                       // podklad na z8 (ostřejší), radar na z7 škálovaný 2×
+  const c = worldPx(S.lat, S.lon, BASE_Z);
+  const left = c.x - half, top = c.y - half;
+
+  ctx.fillStyle = "#dfe8ef";   // světlý podklad i než se dlaždice načtou
+  ctx.fillRect(0, 0, size, size);
+
+  for (const kind of ["base", "radar"]) {
+    if (kind === "radar" && !S.framePath) continue;
+    const z = kind === "base" ? BASE_Z : S.zoom;
+    const scale = Math.pow(2, BASE_Z - z);          // velikost dlaždice v pixelech plátna
+    const tilePx = 256 * scale;
+    ctx.globalAlpha = kind === "radar" ? 0.8 : 1;
+    const tx0 = Math.floor(left / tilePx), tx1 = Math.floor((left + size) / tilePx);
+    const ty0 = Math.floor(top / tilePx),  ty1 = Math.floor((top + size) / tilePx);
+    for (let tx = tx0; tx <= tx1; tx++) for (let ty = ty0; ty <= ty1; ty++) {
+      const bmp = await getBitmapTile(kind, z, tx, ty);
+      if (bmp) ctx.drawImage(bmp, Math.round(tx * tilePx - left), Math.round(ty * tilePx - top), tilePx, tilePx);
+    }
+  }
+  ctx.globalAlpha = 1;
+
+  // kružnice vzdálenosti
+  const mpp = metersPerPixel(S.lat, BASE_Z);
+  ctx.strokeStyle = "rgba(20,40,70,0.35)";
+  ctx.fillStyle = "rgba(20,40,70,0.8)";
+  ctx.font = "10px system-ui"; ctx.textAlign = "left";
+  ctx.lineWidth = 1;
+  for (let km = 20; km <= 60; km += 20) {
+    const r = km * 1000 / mpp;
+    ctx.beginPath(); ctx.arc(half, half, r, 0, Math.PI * 2); ctx.stroke();
+    ctx.fillText(km + " km", half + 3, half - r - 3);
+  }
+
+  // výseč směru pohledu (±8°)
+  const azR = S.az * Math.PI / 180, spread = 8 * Math.PI / 180;
+  const rayLen = S.maxKm * 1000 / mpp;
+  const pt = a => [half + Math.sin(a) * rayLen, half - Math.cos(a) * rayLen];
+  ctx.beginPath();
+  ctx.moveTo(half, half);
+  ctx.lineTo(...pt(azR - spread));
+  ctx.lineTo(...pt(azR + spread));
+  ctx.closePath();
+  ctx.fillStyle = "rgba(2,119,189,0.18)";
+  ctx.fill();
+  ctx.beginPath(); ctx.moveTo(half, half); ctx.lineTo(...pt(azR));
+  ctx.strokeStyle = "#0277bd"; ctx.lineWidth = 1.5; ctx.stroke();
+
+  // pozice pozorovatele
+  ctx.beginPath(); ctx.arc(half, half, 4.5, 0, Math.PI * 2);
+  ctx.fillStyle = "#0277bd"; ctx.fill();
+  ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 2; ctx.stroke();
+}
+
+// ---------- hlavní smyčka ----------
+async function refresh() {
+  const seq = ++scanSeq;
+  $("dirLine").textContent = `Azimut ${Math.round(S.az)}° (${dirName(S.az)}) · poloha ${czNum(S.lat, 3)}, ${czNum(S.lon, 3)}`;
+  if (!S.framePath) return;
+  const samples = await scanRay();
+  if (seq !== scanSeq) return;   // mezitím přišel novější sken
+  const segs = findSegments(samples);
+  drawBeam(samples, segs);
+  drawMap();
+
+  const main = $("mainMsg"), sub = $("subMsg"), list = $("segList");
+  if (!segs.length) {
+    main.innerHTML = `<span class="cat-none">Ve směru pohledu do ${S.maxKm} km neprší.</span>`;
+    sub.textContent = "";
+    list.textContent = "";
+  } else {
+    const s0 = segs[0];
+    const cat = category(s0.maxRate);
+    const segLabel = s => category(s.maxRate).label + (s.snow ? " / sníh" : "");
+    const trend = await computeTrend(S.az, s0.from);
+    main.innerHTML = `Srážky ve směru pohledu: <span class="cat-${cat.id}">${segLabel(s0)}</span>, nejblíž ${czNum(s0.from, 0)} km`;
+    sub.textContent = `Špička v nejbližším pásmu ~${czNum(s0.maxRate)} mm/h · pásmo ${czNum(s0.from, 0)}–${czNum(s0.to, 0)} km`
+      + (trend ? ` · ${trendText(trend)}` : "");
+    list.textContent = "Pásma srážek: " + segs.map(s =>
+      `${czNum(s.from, 0)}–${czNum(s.to, 0)} km (${segLabel(s)}, ~${czNum(s.maxRate)} mm/h)`).join(" · ");
+  }
+}
+
+function setStatus(msg) { $("status").textContent = msg; }
+
+// ---------- ovládání ----------
+$("azSlider").addEventListener("input", e => {
+  S.az = +e.target.value;
+  S.compassOn = false; $("btnCompass").classList.remove("on");
+  $("azVal").textContent = `${Math.round(S.az)}° (${dirName(S.az)})`;
+  document.body.classList.contains("ar") ? arUpdate(false) : refresh();
+});
+
+// Směr POHLEDU KAMERY z plné rotační matice (alfa,beta,gama) — funguje i se svislým
+// telefonem, kde jednoduché "360 - alfa" trpí gimbal lockem a plave.
+function cameraHeading(alpha, beta, gamma) {
+  const d = Math.PI / 180, a = alpha * d, b = beta * d, g = gamma * d;
+  const vx = -(Math.cos(a) * Math.sin(g) + Math.sin(a) * Math.sin(b) * Math.cos(g)); // východ
+  const vy = -(Math.sin(a) * Math.sin(g) - Math.cos(a) * Math.sin(b) * Math.cos(g)); // sever
+  if (Math.hypot(vx, vy) < 0.25) return null;   // kamera míří skoro svisle, azimut nedefinovaný
+  return (Math.atan2(vx, vy) * 180 / Math.PI + 360) % 360;
+}
+// exponenciální vyhlazení úhlu přes sin/cos (bez skoku na 0/360°)
+let smSin = null, smCos = null;
+function smoothHeading(h) {
+  const r = h * Math.PI / 180, k = 0.12;
+  if (smSin === null) { smSin = Math.sin(r); smCos = Math.cos(r); }
+  else { smSin += k * (Math.sin(r) - smSin); smCos += k * (Math.cos(r) - smCos); }
+  return (Math.atan2(smSin, smCos) * 180 / Math.PI + 360) % 360;
+}
+function onOrientation(e) {
+  if (e.beta != null && e.gamma != null) {
+    // elevace osy kamery nad horizontem (kladná = míří k obloze)
+    const d = Math.PI / 180;
+    S.camElev = Math.asin(Math.max(-1, Math.min(1, -Math.cos(e.beta * d) * Math.cos(e.gamma * d)))) * 180 / Math.PI;
+  }
+  if (!S.compassOn) return;
+  let hdg = null;
+  if (e.webkitCompassHeading != null) hdg = e.webkitCompassHeading;           // iOS (kompenzuje náklon)
+  else if (e.alpha != null && (e.absolute || e.type === "deviceorientationabsolute")) {
+    hdg = cameraHeading(e.alpha, e.beta || 0, e.gamma || 0);
+    if (hdg == null) hdg = 360 - e.alpha;
+  }
+  if (hdg == null) return;
+  hdg = smoothHeading(((hdg % 360) + 360) % 360);
+  const dd = ((hdg - S.az + 540) % 360) - 180;
+  if (document.body.classList.contains("ar")) {
+    // vizuál kreslí nepřetržitá RAF smyčka (arFrameLoop) — tady jen aktualizujeme azimut a dat
+    if (Math.abs(dd) >= 0.5) {
+      S.az = hdg;
+      $("azSlider").value = Math.round(hdg);
+      $("azVal").textContent = `${Math.round(hdg)}° (${dirName(hdg)})`;
+      $("hudHead").textContent = `${Math.round(hdg)}° ${dirName(hdg)} · ${czNum(S.lat, 2)}, ${czNum(S.lon, 2)}`;
+    }
+    if (lastFanAz !== null && Math.abs(((S.az - lastFanAz + 540) % 360) - 180) > 6) arUpdate(false);
+    return;
+  }
+  if (Math.abs(dd) < 2) return;   // tlumení překreslování
+  S.az = hdg;
+  $("azSlider").value = Math.round(hdg);
+  $("azVal").textContent = `${Math.round(hdg)}° (${dirName(hdg)})`;
+  refresh();
+}
+async function startCompass(silent) {
+  if (S.compassOn) return true;
+  try {
+    if (typeof DeviceOrientationEvent !== "undefined" && DeviceOrientationEvent.requestPermission) {
+      const st = await DeviceOrientationEvent.requestPermission();   // iOS vyžaduje gesto uživatele
+      if (st !== "granted") { if (!silent) setStatus("Přístup ke kompasu zamítnut."); return false; }
+    }
+    const evName = "ondeviceorientationabsolute" in window ? "deviceorientationabsolute" : "deviceorientation";
+    window.addEventListener(evName, onOrientation);
+    S.compassOn = true;
+    $("btnCompass").classList.add("on");
+    return true;
+  } catch (err) { if (!silent) setStatus("Kompas: " + err.message); return false; }
+}
+$("btnCompass").addEventListener("click", async () => {
+  if (await startCompass(false)) setStatus("Kompas aktivní — otáčejte telefonem. (Na počítači není k dispozici.)");
+});
+
+$("btnGPS").addEventListener("click", () => {
+  if (!navigator.geolocation) { setStatus("Geolokace není v prohlížeči dostupná."); return; }
+  setStatus("Zjišťuji polohu…");
+  navigator.geolocation.getCurrentPosition(
+    pos => {
+      S.lat = pos.coords.latitude; S.lon = pos.coords.longitude;
+      $("lat").value = S.lat.toFixed(4); $("lon").value = S.lon.toFixed(4);
+      setStatus(`Poloha z GPS (±${Math.round(pos.coords.accuracy)} m).`);
+      refresh();
+    },
+    err => setStatus("GPS: " + err.message),
+    { enableHighAccuracy: true, timeout: 10000 }
+  );
+});
+
+$("btnSetPos").addEventListener("click", () => {
+  const la = parseFloat($("lat").value), lo = parseFloat($("lon").value);
+  if (isNaN(la) || isNaN(lo) || Math.abs(la) > 85 || Math.abs(lo) > 180) { setStatus("Neplatné souřadnice."); return; }
+  S.lat = la; S.lon = lo;
+  setStatus("Poloha nastavena ručně.");
+  refresh();
+});
+
+// ---------- AR režim: kamera + HUD ----------
+const HFOV = 60;                 // předpokládané horizontální zorné pole kamery (°)
+let arTimer = null, lastFanAz = null, camOk = false, rainNearby = false;
+const clsCanvas = document.createElement("canvas");
+const clsCtx = clsCanvas.getContext("2d", { willReadFrequently: true });
+
+async function scanRayCoarse(az, framePath) {
+  const jobs = [];
+  for (let d = 1; d <= S.maxKm; d += 1) {
+    const [la, lo] = destPoint(S.lat, S.lon, az, d);
+    jobs.push(sampleEcho(la, lo, framePath).then(e => ({
+      d, snow: !!(e && e.snow), rate: (e && e.dbz >= 10) ? dbzToRate(e.dbz) : 0,
+    })));
+  }
+  const out = [];
+  for (const j of jobs) out.push(await j);
+  return out;
+}
+
+// ---- nowcasting: porovnání aktuálního snímku se starším (~25 min) ve stejném směru ----
+async function nearestRainDist(az, framePath) {
+  const segs = findSegments(await scanRayCoarse(az, framePath));
+  return segs.length ? segs[0].from : null;
+}
+async function computeTrend(az, distNow) {
+  if (!S.trendFramePath || S.trendFramePath === S.framePath) return null;
+  const dtMin = (S.frameTs - S.trendFrameTs) / 60;
+  if (dtMin <= 0) return null;
+  const distPast = await nearestRainDist(az, S.trendFramePath);
+  if (distNow == null && distPast == null) return null;
+  if (distNow == null) return { kind: "gone" };        // srážky tam dřív byly, teď už ne
+  if (distPast == null) return { kind: "forming" };     // nová buňka, dřív tam nic nebylo
+  const rate = (distNow - distPast) / dtMin;             // km/min; záporné = blíží se
+  if (rate < -0.08) return { kind: "approaching", etaMin: distNow / -rate, rate };
+  if (rate > 0.08) return { kind: "receding", rate };
+  return { kind: "stable", rate };
+}
+const TREND_LABEL = {
+  approaching: { cls: "approach", text: "▲ blíží se" },
+  receding:    { cls: "recede",   text: "▼ vzdaluje se" },
+  stable:      { cls: "stable",   text: "• beze změny" },
+  forming:     { cls: "forming",  text: "✦ nová buňka" },
+  gone:        { cls: "stable",   text: "○ mizí" },
+};
+function trendText(t) {
+  if (!t) return "";
+  const l = TREND_LABEL[t.kind];
+  return l.text + (t.kind === "approaching" ? ` · dorazí za ~${czNum(t.etaMin, 0)} min` : "");
+}
+function trendHtml(t) {
+  if (!t) return "";
+  const l = TREND_LABEL[t.kind];
+  const extra = t.kind === "approaching" ? ` · ~${czNum(t.etaMin, 0)} min` : "";
+  return `<span class="trend ${l.cls}">${l.text}${extra}</span>`;
+}
+
+// vějíř paprsků přes zorné pole; sousední paprsky s podobnou vzdáleností deště = jedna buňka
+async function scanFan() {
+  const rays = [];
+  for (let off = -HFOV / 2; off <= HFOV / 2; off += 2) {
+    const segs = findSegments(await scanRayCoarse((S.az + off + 360) % 360));
+    rays.push({ off, segs, seg: segs[0] || null });
+  }
+  const clusters = [];
+  let cur = null;
+  for (const r of rays) {
+    if (r.seg) {
+      if (cur && Math.abs(cur.lastFrom - r.seg.from) < 10) {
+        cur.offs.push(r.off);
+        cur.from = Math.min(cur.from, r.seg.from);
+        cur.maxRate = Math.max(cur.maxRate, r.seg.maxRate);
+        cur.snow = cur.snow || r.seg.snow;
+        cur.lastFrom = r.seg.from;
+      } else {
+        if (cur) clusters.push(cur);
+        cur = { offs: [r.off], from: r.seg.from, maxRate: r.seg.maxRate, snow: r.seg.snow, lastFrom: r.seg.from };
+      }
+    } else if (cur) { clusters.push(cur); cur = null; }
+  }
+  if (cur) clusters.push(cur);
+  // trend počítáme jen pro nejbližší buňky (výkon — každá stojí další sken paprsku)
+  clusters.sort((a, b) => a.from - b.from);
+  for (let i = 0; i < clusters.length && i < 3; i++) {
+    const c = clusters[i];
+    const mid = c.offs.reduce((a, b) => a + b, 0) / c.offs.length;
+    c.trend = await computeTrend((S.az + mid + 360) % 360, c.from);
+  }
+  return { rays, clusters };
+}
+
+// ---- perspektivní projekce deště do záběru ----
+const VFOV = 70;                 // předpokládané svislé zorné pole (°)
+const CLOUD_BASE_KM = 1.5;       // typická výška základny dešťové oblačnosti
+let lastRays = null, lastClusters = null;
+
+function pxPerDeg() { return window.innerHeight / VFOV; }
+function horizonScreenY() {
+  const sh = window.innerHeight;
+  const elev = S.camElev == null ? 21 : S.camElev;   // bez senzorů: horizont v ~80 % výšky
+  return Math.max(-0.5 * sh, Math.min(1.3 * sh, sh / 2 + elev * pxPerDeg()));
+}
+// horní hrana dešťové clony ve vzdálenosti d (úhlová výška základny oblačnosti)
+function curtainTopY(d) {
+  return horizonScreenY() - Math.atan2(CLOUD_BASE_KM, d) * 180 / Math.PI * pxPerDeg();
+}
+
+// Souvislá "stěna deště": jedna hladká silueta (ne pruhy) uložená do offscreen bufferu
+// relativně k horizontu — díky tomu při naklápění telefonu stačí buffer jen posunout,
+// ne přepočítávat (levné každý snímek), a přepočítává se jen při nových datech.
+let curtainBuf = null, curtainBufH = 0, curtainLocalHorizonY = 0, curtainPts = null;
+function buildCurtainBuffer(rays) {
+  const sw = window.innerWidth, dpr = window.devicePixelRatio || 1;
+  const bufH = Math.round(pxPerDeg() * 45 + 40);
+  curtainLocalHorizonY = bufH - 20;
+  curtainBufH = bufH;
+  if (!curtainBuf) curtainBuf = document.createElement("canvas");
+  curtainBuf.width = Math.round(sw * dpr); curtainBuf.height = Math.round(bufH * dpr);
+  const ctx = curtainBuf.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, sw, bufH);
+  curtainPts = null;
+  if (!rays || !rays.length) return;
+
+  // bod pro každý paprsek vějíře; bez deště výška 0 (leží na horizontu) → tvar je spojitý sám o sobě
+  const pts = rays.map(r => {
+    const seg = r.segs && r.segs.length ? r.segs.reduce((a, b) => (a.from < b.from ? a : b)) : null;
+    const h = seg ? Math.atan2(CLOUD_BASE_KM, seg.from) * 180 / Math.PI * pxPerDeg() : 0;
+    const col = seg ? (seg.snow ? "#e1f5fe" : CAT_COLOR[category(seg.maxRate).id]) : null;
+    return { x: sw / 2 + r.off * (sw / HFOV), h, col, rate: seg ? seg.maxRate : 0 };
+  });
+  for (let i = 0; i < pts.length; i++)
+    if (!pts[i].col) pts[i].col = (pts[i - 1] && pts[i - 1].col) || (pts[i + 1] && pts[i + 1].col) || "#4fc3f7";
+  curtainPts = pts;
+
+  const y = p => curtainLocalHorizonY - p.h;
+  ctx.beginPath();
+  ctx.moveTo(pts[0].x, y(pts[0]));
+  for (let i = 1; i < pts.length - 1; i++) {           // hladké napojení bodů (bez lomů mezi paprsky)
+    const xm = (pts[i].x + pts[i + 1].x) / 2, ym = (y(pts[i]) + y(pts[i + 1])) / 2;
+    ctx.quadraticCurveTo(pts[i].x, y(pts[i]), xm, ym);
+  }
+  ctx.quadraticCurveTo(pts[pts.length - 2].x, y(pts[pts.length - 2]), pts[pts.length - 1].x, y(pts[pts.length - 1]));
+  ctx.lineTo(pts[pts.length - 1].x, curtainLocalHorizonY);
+  ctx.lineTo(pts[0].x, curtainLocalHorizonY);
+  ctx.closePath();
+
+  ctx.save();
+  ctx.clip();
+  ctx.filter = "blur(6px)";                            // měkké, "vzdušné" okraje místo ostrých bloků
+  const x0 = pts[0].x, x1 = pts[pts.length - 1].x, pad = 12;
+  const hg = ctx.createLinearGradient(x0, 0, x1, 0);    // barva plynule podle intenzity napříč výhledem
+  pts.forEach(p => hg.addColorStop(Math.min(1, Math.max(0, (p.x - x0) / ((x1 - x0) || 1))), p.col));
+  ctx.fillStyle = hg;
+  ctx.fillRect(x0 - pad, 0, (x1 - x0) + pad * 2, bufH);
+  ctx.globalCompositeOperation = "destination-in";       // svisle dohasíná směrem k obloze
+  const vg = ctx.createLinearGradient(0, 0, 0, curtainLocalHorizonY);
+  vg.addColorStop(0, "rgba(0,0,0,0)");
+  vg.addColorStop(0.45, "rgba(0,0,0,0.5)");
+  vg.addColorStop(1, "rgba(0,0,0,0.88)");
+  ctx.fillStyle = vg;
+  ctx.fillRect(x0 - pad, 0, (x1 - x0) + pad * 2, bufH);
+  ctx.restore();
+}
+
+// ---- animovaný padající déšť (částice) ----
+let streaks = [];
+function pickRainAnchor() {
+  if (!curtainPts) return null;
+  const rainy = curtainPts.filter(p => p.h > 4);
+  return rainy.length ? rainy[Math.floor(Math.random() * rainy.length)] : null;
+}
+function spawnStreak() {
+  const p = pickRainAnchor();
+  if (!p) return;
+  const jitter = (Math.random() - 0.5) * (window.innerWidth / HFOV) * 2.2;
+  const speedF = 0.6 + Math.random() * 0.8;
+  streaks.push({
+    x: p.x + jitter,
+    hLocal: p.h * (0.15 + Math.random() * 0.95),
+    vy: (130 + p.h * 0.9) * speedF,
+    len: 10 + Math.random() * 15,
+    drift: (Math.random() - 0.5) * 6,
+    alpha: 0.22 + Math.random() * 0.34,
+  });
+}
+function stepStreaks(dt) {
+  for (let i = streaks.length - 1; i >= 0; i--) {
+    streaks[i].hLocal -= streaks[i].vy * dt;
+    if (streaks[i].hLocal < -5) streaks.splice(i, 1);
+  }
+  const targetCount = curtainPts ? Math.min(220, curtainPts.filter(p => p.h > 4).length * 7) : 0;
+  while (streaks.length < targetCount) spawnStreak();
+}
+
+function renderARFrame() {
+  const cv = $("arCanvas");
+  const dpr = window.devicePixelRatio || 1, sw = window.innerWidth, sh = window.innerHeight;
+  const wantW = Math.round(sw * dpr), wantH = Math.round(sh * dpr);
+  if (cv.width !== wantW || cv.height !== wantH) { cv.width = wantW; cv.height = wantH; }
+  const ctx = cv.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, sw, sh);
+  const hy = horizonScreenY();
+
+  if (curtainBuf) ctx.drawImage(curtainBuf, 0, hy - curtainLocalHorizonY, sw, curtainBufH);
+
+  ctx.lineCap = "round";
+  for (const p of streaks) {
+    const yS = hy - p.hLocal;
+    if (yS < -20 || yS > sh + 20) continue;
+    ctx.strokeStyle = `rgba(225,238,255,${p.alpha.toFixed(2)})`;
+    ctx.lineWidth = 1.3;
+    ctx.beginPath();
+    ctx.moveTo(p.x, yS);
+    ctx.lineTo(p.x - p.drift, yS + p.len);
+    ctx.stroke();
+  }
+
+  ctx.strokeStyle = "rgba(255,255,255,0.28)";
+  ctx.setLineDash([6, 8]);
+  ctx.beginPath(); ctx.moveTo(0, hy + 0.5); ctx.lineTo(sw, hy + 0.5); ctx.stroke();
+  ctx.setLineDash([]);
+}
+
+// štítky (.mark) jsou DOM prvky — jejich pozici přepočítáváme každý snímek zvlášť (levné, jen pár prvků)
+function repositionMarks() {
+  const sh = window.innerHeight;
+  document.querySelectorAll("#hudMarks .mark").forEach(el => {
+    const from = +el.dataset.from;
+    el.style.top = Math.min(sh * 0.72, Math.max(sh * 0.14, curtainTopY(from) - 34)) + "px";
+  });
+}
+
+let rainRAF = null, lastFrameT = 0;
+function arFrameLoop(ts) {
+  if (!document.body.classList.contains("ar")) { rainRAF = null; return; }
+  const dt = lastFrameT ? Math.min(0.05, (ts - lastFrameT) / 1000) : 0.016;
+  lastFrameT = ts;
+  stepStreaks(dt);
+  renderARFrame();
+  repositionMarks();
+  rainRAF = requestAnimationFrame(arFrameLoop);
+}
+window.addEventListener("resize", () => {
+  if (document.body.classList.contains("ar") && lastRays) buildCurtainBuffer(lastRays);
+});
+
+function renderMarkers(clusters) {
+  const box = $("hudMarks");
+  box.innerHTML = "";
+  for (const c of clusters) {
+    const mid = c.offs.reduce((a, b) => a + b, 0) / c.offs.length;
+    const cat = category(c.maxRate);
+    const el = document.createElement("div");
+    el.className = "mark";
+    el.dataset.from = c.from;
+    el.style.left = Math.min(94, Math.max(6, 50 + mid / (HFOV / 2) * 44)) + "%";
+    const sh = window.innerHeight;
+    el.style.top = Math.min(sh * 0.72, Math.max(sh * 0.14, curtainTopY(c.from) - 34)) + "px";
+    el.style.borderColor = c.snow ? "#e1f5fe" : CAT_COLOR[cat.id];
+    el.innerHTML = `<b>${czNum(c.from, 0)} km</b>${cat.label}${c.snow ? " / sníh" : ""} · ~${czNum(c.maxRate)} mm/h${trendHtml(c.trend)}`;
+    box.appendChild(el);
+  }
+  rainNearby = clusters.some(c => c.from <= 30);
+  const nearest = clusters.length ? clusters.reduce((a, b) => (a.from < b.from ? a : b)) : null;
+  $("hudRain").textContent = nearest
+    ? `Nejbližší srážky ve výhledu: ${czNum(nearest.from, 0)} km${nearest.trend ? " · " + trendText(nearest.trend) : ""}`
+    : `Ve výhledu (±${HFOV / 2}°) do ${S.maxKm} km neprší.`;
+}
+
+// hrubá klasifikace oblačnosti z obrazu kamery (heuristika, ne ML);
+// testSource (canvas) umožňuje ověřit logiku bez kamery
+function classifyClouds(testSource) {
+  const src = testSource || $("cam");
+  const vw = testSource ? src.width : src.videoWidth;
+  const vh = testSource ? src.height : src.videoHeight;
+  const tag = $("cloudTag");
+  if (!vw || (!testSource && !camOk)) {
+    tag.style.display = "none";
+    $("hudCloud").textContent = "Oblačnost: kamera nedostupná";
+    return;
+  }
+  // kamera míří pod horizont -> nemá smysl hledat mraky
+  if (!testSource && S.camElev != null && S.camElev < 5) {
+    tag.style.display = "none";
+    $("hudCloud").textContent = "Oblačnost: namiřte kameru na oblohu";
+    return;
+  }
+  const w = 128, h = Math.max(32, Math.round(w * vh / vw));
+  clsCanvas.width = w; clsCanvas.height = h;
+  clsCtx.drawImage(src, 0, 0, w, h);
+  const skyH = Math.floor(h * 0.65);              // horní část záběru = obloha
+  const px = clsCtx.getImageData(0, 0, w, skyH).data;
+  const COLS = 16, CELL = w / COLS, ROWS = Math.ceil(skyH / CELL);
+  const cellCloud = new Float32Array(COLS * ROWS), cellN = new Float32Array(COLS * ROWS);
+  let blue = 0, cloud = 0, dark = 0, warm = 0, lumSum = 0, lumSq = 0, edge = 0, n = 0;
+  const lum = new Float32Array(w * skyH);
+  for (let y = 0; y < skyH; y++) for (let x = 0; x < w; x++) {
+    const i = y * w + x;
+    const r = px[i * 4], g = px[i * 4 + 1], b = px[i * 4 + 2];
+    const L = 0.299 * r + 0.587 * g + 0.114 * b;
+    const sat = Math.max(r, g, b) - Math.min(r, g, b);
+    lum[i] = L; lumSum += L; lumSq += L * L; n++;
+    if (r > b + 20 || g > b + 15) warm++;   // zeleň/hnědá/teplé tóny = nejspíš země, ne obloha
+    let isCloud = false;
+    if (b > r + 15 && b > g && b > 110) blue++;
+    else if (L > 150 && sat < 50) { cloud++; isCloud = true; }
+    else if (L < 115 && sat < 45) { dark++; isCloud = true; }
+    const ci = Math.floor(y / CELL) * COLS + Math.floor(x / CELL);
+    cellN[ci]++;
+    if (isCloud) cellCloud[ci]++;
+  }
+  let edgePx = 0;
+  for (let y = 0; y < skyH - 1; y++) for (let x = 0; x < w - 1; x++) {
+    const i = y * w + x;
+    const grad = Math.abs(lum[i + 1] - lum[i]) + Math.abs(lum[i + w] - lum[i]);
+    edge += grad;
+    if (grad > 30) edgePx++;
+  }
+  const st = {
+    blueF: blue / n, cloudF: cloud / n, darkF: dark / n, warmF: warm / n,
+    meanLum: lumSum / n,
+    std: Math.sqrt(Math.max(0, lumSq / n - (lumSum / n) ** 2)),
+    edgeF: edgePx / ((w - 1) * (skyH - 1)),   // podíl výrazných hran (nezávislé na měřítku)
+  };
+  MR.lastSt = st;
+  // scéna nevypadá jako obloha (převaha zeleně/hnědé) -> neklasifikovat
+  if (st.warmF > 0.4) {
+    tag.style.display = "none";
+    $("hudCloud").textContent = "Oblačnost: v záběru nevidím oblohu";
+    return;
+  }
+  const cl = cloudLabel(st);
+  $("hudCloud").textContent = "Oblačnost: " + cl.text + " · heuristický odhad";
+
+  // ohraničení oblačné oblasti v záběru (buňky rastru s >35 % oblačných pixelů)
+  let c0 = COLS, c1 = -1, r0 = ROWS, r1 = -1;
+  for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
+    const ci = r * COLS + c;
+    if (cellN[ci] && cellCloud[ci] / cellN[ci] > 0.35) {
+      c0 = Math.min(c0, c); c1 = Math.max(c1, c);
+      r0 = Math.min(r0, r); r1 = Math.max(r1, r);
+    }
+  }
+  if (c1 < 0 || !cl.tag) { tag.style.display = "none"; return; }
+  // převod souřadnic zmenšeného snímku na obrazovku (object-fit: cover)
+  const sw = window.innerWidth, sh = window.innerHeight;
+  const scale = Math.max(sw / vw, sh / vh) * (vw / w);
+  const ox = (vw * Math.max(sw / vw, sh / vh) - sw) / 2;
+  const oy = (vh * Math.max(sw / vw, sh / vh) - sh) / 2;
+  const x0 = Math.max(8, c0 * CELL * scale - ox), x1 = Math.min(sw - 8, (c1 + 1) * CELL * scale - ox);
+  const y0 = Math.max(48, r0 * CELL * scale - oy), y1 = Math.min(sh - 8, (r1 + 1) * CELL * scale - oy);
+  if (x1 - x0 < 30 || y1 - y0 < 20) { tag.style.display = "none"; return; }
+  tag.style.left = x0 + "px"; tag.style.top = y0 + "px";
+  tag.style.width = (x1 - x0) + "px"; tag.style.height = (y1 - y0) + "px";
+  tag.querySelector("span").textContent = "☁ " + cl.tag;
+  tag.style.display = "block";
+}
+function cloudLabel(st) {
+  const total = st.cloudF + st.darkF;
+  if (total < 0.08 && st.blueF > 0.3) return { tag: null, text: "jasno, jen ojedinělé mraky" };
+  if (st.darkF > 0.30 && st.std < 40 && st.edgeF < 0.02)
+    return rainNearby ? { tag: "nimbostratus", text: "nimbostratus — souvislá dešťová vrstva" }
+                      : { tag: "stratus / nimbostratus", text: "hustá vrstevnatá oblačnost (stratus / nimbostratus)" };
+  if (st.darkF > 0.18 && (st.edgeF > 0.05 || st.std > 55))
+    return rainNearby ? { tag: "cumulonimbus", text: "cumulonimbus — bouřkový oblak, v okolí srážky" }
+                      : { tag: "congestus / cumulonimbus", text: "mohutná kupovitá oblačnost (congestus / cumulonimbus)" };
+  if (st.blueF > 0.18 && st.edgeF > 0.025 && st.cloudF > 0.12) return { tag: "cumulus", text: "cumulus — kupovitá oblačnost" };
+  if (total > 0.75 && st.edgeF < 0.02 && st.meanLum > 135) return { tag: "stratus / altostratus", text: "stratus / altostratus — světlá souvislá vrstva" };
+  if (st.cloudF < 0.4 && st.blueF > 0.25 && st.edgeF < 0.03 && st.meanLum > 130) return { tag: "cirrus", text: "cirrus / cirrostratus — vysoká řasovitá oblačnost" };
+  return { tag: "smíšená oblačnost", text: "smíšená oblačnost" };
+}
+
+async function arUpdate(force) {
+  $("hudHead").textContent = `${Math.round(S.az)}° ${dirName(S.az)} · ${czNum(S.lat, 2)}, ${czNum(S.lon, 2)}`;
+  $("hudRadarT").textContent = $("radarTime").textContent;
+  if (force || lastFanAz === null || Math.abs(((S.az - lastFanAz + 540) % 360) - 180) > 6) {
+    lastFanAz = S.az;
+    const fan = await scanFan();
+    lastRays = fan.rays;
+    lastClusters = fan.clusters;
+    renderMarkers(fan.clusters);
+    buildCurtainBuffer(fan.rays);
+  }
+  classifyClouds();
+}
+
+async function enterAR() {
+  await startCompass(true);   // kvůli azimutu i náklonu (horizont clon); dřív než kamera, ať iOS nepřijde o gesto
+  try {
+    $("cam").srcObject = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+    camOk = true;
+    document.body.classList.remove("ar-nocam");
+  } catch (err) {
+    camOk = false;
+    document.body.classList.add("ar-nocam");   // HUD poběží i bez obrazu
+  }
+  document.body.classList.add("ar");
+  $("btnCam").classList.add("on");
+  arUpdate(true);
+  arTimer = setInterval(() => arUpdate(false), 3000);
+  streaks = []; lastFrameT = 0;
+  if (!rainRAF) rainRAF = requestAnimationFrame(arFrameLoop);
+}
+function exitAR() {
+  const v = $("cam");
+  $("cloudTag").style.display = "none";
+  document.body.classList.remove("ar", "ar-nocam");
+  if (v.srcObject) { v.srcObject.getTracks().forEach(t => t.stop()); v.srcObject = null; }
+  $("btnCam").classList.remove("on");
+  if (arTimer) { clearInterval(arTimer); arTimer = null; }
+  if (rainRAF) { cancelAnimationFrame(rainRAF); rainRAF = null; }
+  lastFanAz = null; lastRays = null; lastClusters = null; curtainBuf = null; curtainPts = null; streaks = [];
+  refresh();
+}
+$("btnCam").addEventListener("click", () => document.body.classList.contains("ar") ? exitAR() : enterAR());
+$("hudExit").addEventListener("click", exitAR);
+
+$("btnRefresh").addEventListener("click", async () => {
+  try { await loadRadarMeta(); await refresh(); }
+  catch (err) { setStatus("Radar se nepodařilo obnovit: " + err.message); }
+});
+
+// pro ladění z konzole
+window.MR = {
+  S, refresh, sampleEcho, scanRay,
+  setPos(la, lo) { S.lat = la; S.lon = lo; $("lat").value = la; $("lon").value = lo; return refresh(); },
+  setAz(a) {
+    S.az = a; $("azSlider").value = Math.round(a); $("azVal").textContent = `${Math.round(a)}° (${dirName(a)})`;
+    return document.body.classList.contains("ar") ? arUpdate(true) : refresh();
+  },
+  enterAR, exitAR, classifyClouds, cameraHeading,
+  scanFan, buildCurtainBuffer, computeTrend, arFrameLoop, stepStreaks, renderARFrame,
+  _debug: () => ({ curtainPtsLen: curtainPts ? curtainPts.length : 0, streaksLen: streaks.length, hasBuf: !!curtainBuf, rainRAF: !!rainRAF, trendFramePath: S.trendFramePath }),
+};
+
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => navigator.serviceWorker.register("sw.js").catch(() => {}));
+}
+
+// ---------- start ----------
+(async () => {
+  $("lat").value = S.lat.toFixed(4); $("lon").value = S.lon.toFixed(4);
+  try {
+    await loadRadarMeta();
+    await refresh();
+    setStatus("Výchozí poloha: Praha. Tlačítkem 📍 GPS použijete skutečnou polohu.");
+  } catch (err) {
+    $("mainMsg").textContent = "Radar se nepodařilo načíst.";
+    setStatus(err.message);
+  }
+  setInterval(async () => {
+    try { await loadRadarMeta(); await refresh(); } catch (e) {}
+  }, 5 * 60 * 1000);
+})();
+</script>
+</body>
+</html>
