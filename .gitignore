@@ -3,3 +3,7 @@ android-build/
 cloudflared.exe
 mrakoradar.apk
 tunnel.log
+ml/node_modules/
+ml/data/
+ml/cache/
+ml/*.log

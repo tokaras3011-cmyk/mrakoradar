@@ -8,6 +8,7 @@
 <meta name="theme-color" content="#0b1220">
 <link rel="icon" href="icon-192.png">
 <link rel="apple-touch-icon" href="icon-192.png">
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
 <style>
   :root {
     --bg: #0b1220;
@@ -173,7 +174,7 @@
     <div id="status" class="muted small"></div>
   </section>
 
-  <footer class="muted small">Data: RainViewer (globální radarový kompozit, krok ~10 min). Odhad intenzity z odrazivosti (Marshall–Palmer). Prototyp — přesnost směru závisí na kalibraci kompasu telefonu.</footer>
+  <footer class="muted small">Data: RainViewer (globální radarový kompozit, krok ~10 min). Odhad intenzity z odrazivosti (Marshall–Palmer). Nowcasting z lineárního trendu 3 snímků (teď, −15 min, −30 min). Prototyp — přesnost směru závisí na kalibraci kompasu telefonu.<span id="mlFooterNote"></span></footer>
 </div>
 
 <script>
@@ -186,7 +187,7 @@ const S = {
   zoom: 7,   // RainViewer servíruje barevné palety max. do zoomu 7
 
   host: null, framePath: null, frameTs: null,
-  trendFramePath: null, trendFrameTs: null,   // starší snímek pro odhad pohybu srážek (nowcasting)
+  trendFrames: [],   // starší snímky (~15 a ~30 min zpět) pro odhad pohybu/vývoje srážek (nowcasting)
   maxKm: 80, stepKm: 0.5,
   compassOn: false,
   camElev: null,   // elevace kamery nad horizontem (°), null = neznámá
@@ -225,21 +226,27 @@ const dirName = az => DIRS[Math.round(((az % 360) + 360) % 360 / 22.5) % 16];
 // ---------- radar: metadata a dlaždice ----------
 async function loadRadarMeta() {
   setStatus("Načítám metadata radaru…");
-  const r = await fetch("https://api.rainviewer.com/public/weather-maps.json");
+  const r = await fetch("https://api.rainviewer.com/public/weather-maps.json", { cache: "no-store" });
   if (!r.ok) throw new Error("weather-maps.json: HTTP " + r.status);
   const j = await r.json();
   const past = j.radar && j.radar.past;
   if (!past || !past.length) throw new Error("radar: žádné snímky");
   const last = past[past.length - 1];
   S.host = j.host; S.framePath = last.path; S.frameTs = last.time;
-  // starší snímek ~25 min zpět — z rozdílu polohy srážek mezi snímky odhadujeme, jestli se blíží/vzdalují
-  if (past.length > 1) {
-    const targetT = last.time - 25 * 60;
-    let best = past[0];
-    for (const f of past) if (Math.abs(f.time - targetT) < Math.abs(best.time - targetT)) best = f;
-    if (best.path !== last.path) { S.trendFramePath = best.path; S.trendFrameTs = best.time; }
-    else { S.trendFramePath = null; S.trendFrameTs = null; }
-  } else { S.trendFramePath = null; S.trendFrameTs = null; }
+  // dva starší snímky (~15 a ~30 min zpět) — z trendu polohy/intenzity přes 3 body odhadujeme
+  // spolehlivěji, jestli se srážky blíží/vzdalují a jestli sílí/slábnou (viz computeTrend)
+  S.trendFrames = [];
+  for (const offsetSec of [15 * 60, 30 * 60]) {
+    const targetT = last.time - offsetSec;
+    let best = null, bestD = Infinity;
+    for (const f of past) {
+      if (f.path === last.path) continue;
+      const d = Math.abs(f.time - targetT);
+      if (d < bestD) { bestD = d; best = f; }
+    }
+    if (best && bestD <= 8 * 60 && !S.trendFrames.some(x => x.path === best.path)) S.trendFrames.push(best);
+  }
+  S.trendFrames.sort((a, b) => a.time - b.time);
   grayTiles.clear();
   for (const k of [...colorTiles.keys()]) if (k.startsWith("radar/")) colorTiles.delete(k);
   $("radarTime").textContent = "radar: " + new Date(S.frameTs * 1000).toLocaleTimeString("cs-CZ", { hour: "2-digit", minute: "2-digit" });
@@ -506,7 +513,7 @@ async function refresh() {
     const s0 = segs[0];
     const cat = category(s0.maxRate);
     const segLabel = s => category(s.maxRate).label + (s.snow ? " / sníh" : "");
-    const trend = await computeTrend(S.az, s0.from);
+    const trend = await computeTrend(S.az, { dist: s0.from, rate: s0.maxRate });
     main.innerHTML = `Srážky ve směru pohledu: <span class="cat-${cat.id}">${segLabel(s0)}</span>, nejblíž ${czNum(s0.from, 0)} km`;
     sub.textContent = `Špička v nejbližším pásmu ~${czNum(s0.maxRate)} mm/h · pásmo ${czNum(s0.from, 0)}–${czNum(s0.to, 0)} km`
       + (trend ? ` · ${trendText(trend)}` : "");
@@ -635,41 +642,71 @@ async function scanRayCoarse(az, framePath) {
   return out;
 }
 
-// ---- nowcasting: porovnání aktuálního snímku se starším (~25 min) ve stejném směru ----
-async function nearestRainDist(az, framePath) {
+// ---- nowcasting: trend ze 3 časových bodů (teď + ~15 a ~30 min zpět) ve stejném směru ----
+// Víc bodů než pouhé srovnání dvou snímků potlačí šum jednotlivého radarového snímku
+// (lineární regrese vzdálenosti v čase) a navíc umožní odhadnout, jestli buňka sílí/slábne.
+async function nearestRainInfo(az, framePath) {
   const segs = findSegments(await scanRayCoarse(az, framePath));
-  return segs.length ? segs[0].from : null;
+  return segs.length ? { dist: segs[0].from, rate: segs[0].maxRate } : null;
 }
-async function computeTrend(az, distNow) {
-  if (!S.trendFramePath || S.trendFramePath === S.framePath) return null;
-  const dtMin = (S.frameTs - S.trendFrameTs) / 60;
-  if (dtMin <= 0) return null;
-  const distPast = await nearestRainDist(az, S.trendFramePath);
-  if (distNow == null && distPast == null) return null;
-  if (distNow == null) return { kind: "gone" };        // srážky tam dřív byly, teď už ne
-  if (distPast == null) return { kind: "forming" };     // nová buňka, dřív tam nic nebylo
-  const rate = (distNow - distPast) / dtMin;             // km/min; záporné = blíží se
-  if (rate < -0.08) return { kind: "approaching", etaMin: distNow / -rate, rate };
-  if (rate > 0.08) return { kind: "receding", rate };
-  return { kind: "stable", rate };
+function linearSlope(points) {   // nejmenší čtverce, x v minutách od prvního bodu, y = vzdálenost (km)
+  const t0 = points[0].t;
+  let n = 0, sumX = 0, sumY = 0, sumXY = 0, sumXX = 0;
+  for (const p of points) {
+    const x = (p.t - t0) / 60, y = p.dist;
+    n++; sumX += x; sumY += y; sumXY += x * y; sumXX += x * x;
+  }
+  const denom = n * sumXX - sumX * sumX;
+  return denom !== 0 ? (n * sumXY - sumX * sumY) / denom : 0;
 }
-const TREND_LABEL = {
-  approaching: { cls: "approach", text: "▲ blíží se" },
-  receding:    { cls: "recede",   text: "▼ vzdaluje se" },
-  stable:      { cls: "stable",   text: "• beze změny" },
-  forming:     { cls: "forming",  text: "✦ nová buňka" },
-  gone:        { cls: "stable",   text: "○ mizí" },
-};
+async function computeTrend(az, nowInfo) {
+  if (!S.trendFrames.length) return null;
+  const points = [];
+  for (const f of S.trendFrames) {
+    const info = await nearestRainInfo(az, f.path);
+    points.push({ t: f.time, dist: info ? info.dist : null, rate: info ? info.rate : null });
+  }
+  points.push({ t: S.frameTs, dist: nowInfo ? nowInfo.dist : null, rate: nowInfo ? nowInfo.rate : null });
+  const valid = points.filter(p => p.dist != null);
+  if (!valid.length) return null;
+  if (valid.length === 1) return valid[0].t === S.frameTs ? { kind: "forming" } : { kind: "gone" };
+
+  const speedKmMin = linearSlope(valid);   // záporné = blíží se
+  const rateFirst = valid[0].rate, rateLast = valid[valid.length - 1].rate;
+  let intensity = "stable";
+  if (rateFirst > 0 && rateLast != null) {
+    const ratio = rateLast / rateFirst;
+    if (ratio > 1.3) intensity = "strengthening";
+    else if (ratio < 0.7) intensity = "weakening";
+  }
+  const distNow = nowInfo ? nowInfo.dist : valid[valid.length - 1].dist;
+  if (speedKmMin < -0.08) return { kind: "approaching", etaMin: distNow / -speedKmMin, speedKmMin, intensity };
+  if (speedKmMin > 0.08) return { kind: "receding", speedKmMin, intensity };
+  return { kind: "stable", speedKmMin, intensity };
+}
+const TREND_CLASS = { approaching: "approach", receding: "recede", stable: "stable", forming: "forming", gone: "stable" };
 function trendText(t) {
   if (!t) return "";
-  const l = TREND_LABEL[t.kind];
-  return l.text + (t.kind === "approaching" ? ` · dorazí za ~${czNum(t.etaMin, 0)} min` : "");
+  if (t.kind === "approaching") {
+    const suffix = t.intensity === "strengthening" ? " a sílí" : t.intensity === "weakening" ? ", ale slábne" : "";
+    return `▲ blíží se${suffix} · dorazí za ~${czNum(t.etaMin, 0)} min`;
+  }
+  if (t.kind === "receding") {
+    const suffix = t.intensity === "strengthening" ? ", ale sílí" : t.intensity === "weakening" ? " a slábne" : "";
+    return `▼ vzdaluje se${suffix}`;
+  }
+  if (t.kind === "stable") {
+    if (t.intensity === "strengthening") return "• na místě sílí";
+    if (t.intensity === "weakening") return "• na místě slábne";
+    return "• beze změny";
+  }
+  if (t.kind === "forming") return "✦ nová buňka";
+  if (t.kind === "gone") return "○ mizí";
+  return "";
 }
 function trendHtml(t) {
   if (!t) return "";
-  const l = TREND_LABEL[t.kind];
-  const extra = t.kind === "approaching" ? ` · ~${czNum(t.etaMin, 0)} min` : "";
-  return `<span class="trend ${l.cls}">${l.text}${extra}</span>`;
+  return `<span class="trend ${TREND_CLASS[t.kind]}">${trendText(t)}</span>`;
 }
 
 // vějíř paprsků přes zorné pole; sousední paprsky s podobnou vzdáleností deště = jedna buňka
@@ -696,12 +733,12 @@ async function scanFan() {
     } else if (cur) { clusters.push(cur); cur = null; }
   }
   if (cur) clusters.push(cur);
-  // trend počítáme jen pro nejbližší buňky (výkon — každá stojí další sken paprsku)
+  // trend počítáme jen pro nejbližší buňky (výkon — každá stojí další 2 skeny paprsku)
   clusters.sort((a, b) => a.from - b.from);
-  for (let i = 0; i < clusters.length && i < 3; i++) {
+  for (let i = 0; i < clusters.length && i < 4; i++) {
     const c = clusters[i];
     const mid = c.offs.reduce((a, b) => a + b, 0) / c.offs.length;
-    c.trend = await computeTrend((S.az + mid + 360) % 360, c.from);
+    c.trend = await computeTrend((S.az + mid + 360) % 360, { dist: c.from, rate: c.maxRate });
   }
   return { rays, clusters };
 }
@@ -886,6 +923,82 @@ function renderMarkers(clusters) {
     : `Ve výhledu (±${HFOV / 2}°) do ${S.maxKm} km neprší.`;
 }
 
+// ---- ML klasifikátor mraků (natrénováno na datasetu CCSN, 2543 snímků, 11 tříd WMO) ----
+// Malá plně propojená síť na ručně navržených příznacích (průměr barvy, textura, hustota hran
+// po 8x8 mřížce) — ne konvoluce ani syrové pixely: trénink na tomto stroji běží na čistě JS
+// CPU backendu (bez GPU/WASM/nativní akcelerace — viz poznámka v ml/train.js) a obojí bylo
+// buď neúnosně pomalé, nebo se nedostatečně učilo. Příznaky se tu v appce musí počítat úplně
+// stejně jako při trénování (viz ml/prepare-data.js), jinak by model dostával jiná data, než
+// na jakých se učil. Pokud se model nenačte, appka spadne zpět na starší heuristiku (cloudLabelHeuristic).
+const CLOUD_NAMES = {
+  Ac: "Altocumulus — vysoká kupovitá oblačnost",
+  As: "Altostratus — vysoká vrstevnatá oblačnost",
+  Cb: "Cumulonimbus — bouřkový oblak",
+  Cc: "Cirrocumulus — vysoká zrnitá oblačnost",
+  Ci: "Cirrus — řasa",
+  Cs: "Cirrostratus — vysoká závojová oblačnost",
+  Ct: "Kondenzační pruh (kontrail)",
+  Cu: "Cumulus — kupa",
+  Ns: "Nimbostratus — dešťová vrstva",
+  Sc: "Stratocumulus — kupovitá vrstva",
+  St: "Stratus — nízká vrstevnatá oblačnost",
+};
+let mlModel = null, mlLabels = null, mlLoadFailed = false;
+async function loadMlModel() {
+  if (mlModel || mlLoadFailed) return;
+  try {
+    mlLabels = await (await fetch("model/labels.json")).json();
+    mlModel = await tf.loadLayersModel("model/model.json");
+    const note = $("mlFooterNote");
+    if (note) note.textContent = ` Klasifikace mraků: natrénovaný model (dataset CCSN, 11 tříd WMO, změřená validační přesnost ${czNum(mlLabels.valAccuracy * 100, 0)} % — výrazně nad náhodou (~9 %), ale ne spolehlivá na první pohled u vizuálně podobných typů).`;
+  } catch (e) {
+    mlLoadFailed = true;
+    console.warn("ML model se nepodařilo načíst, používám heuristiku:", e.message);
+  }
+}
+const mlFeatCanvas = document.createElement("canvas");
+const mlFeatCtx = mlFeatCanvas.getContext("2d", { willReadFrequently: true });
+// stejný výpočet příznaků jako ml/prepare-data.js: extractFeatures() — musí sedět 1:1
+function extractFeaturesFromCanvas(src, work, grid) {
+  mlFeatCanvas.width = work; mlFeatCanvas.height = work;
+  mlFeatCtx.drawImage(src, 0, 0, work, work);
+  const px = mlFeatCtx.getImageData(0, 0, work, work).data;   // RGBA 0..255
+  const cell = work / grid;
+  const lum = new Float32Array(work * work);
+  for (let i = 0; i < work * work; i++)
+    lum[i] = 0.299 * (px[i * 4] / 255) + 0.587 * (px[i * 4 + 1] / 255) + 0.114 * (px[i * 4 + 2] / 255);
+  const feats = [];
+  for (let gy = 0; gy < grid; gy++) {
+    for (let gx = 0; gx < grid; gx++) {
+      let sumR = 0, sumG = 0, sumB = 0, sumL = 0, sumL2 = 0, edgeSum = 0, n = 0;
+      for (let y = gy * cell; y < (gy + 1) * cell; y++) {
+        for (let x = gx * cell; x < (gx + 1) * cell; x++) {
+          const i = y * work + x;
+          sumR += px[i * 4] / 255; sumG += px[i * 4 + 1] / 255; sumB += px[i * 4 + 2] / 255;
+          sumL += lum[i]; sumL2 += lum[i] * lum[i];
+          if (x < work - 1) edgeSum += Math.abs(lum[i + 1] - lum[i]);
+          if (y < work - 1) edgeSum += Math.abs(lum[i + work] - lum[i]);
+          n++;
+        }
+      }
+      const meanL = sumL / n, varL = Math.max(0, sumL2 / n - meanL * meanL);
+      feats.push(sumR / n, sumG / n, sumB / n, Math.sqrt(varL), edgeSum / (2 * n));
+    }
+  }
+  return feats;
+}
+function classifyWithModel(canvas) {
+  const feats = extractFeaturesFromCanvas(canvas, mlLabels.work, mlLabels.grid);
+  const { mean, std } = mlLabels.norm;
+  const normed = feats.map((v, i) => (v - mean[i]) / std[i]);
+  return tf.tidy(() => {
+    const probs = mlModel.predict(tf.tensor2d([normed])).dataSync();
+    let best = 0;
+    for (let i = 1; i < probs.length; i++) if (probs[i] > probs[best]) best = i;
+    return { cls: mlLabels.classes[best], confidence: probs[best] };
+  });
+}
+
 // hrubá klasifikace oblačnosti z obrazu kamery (heuristika, ne ML);
 // testSource (canvas) umožňuje ověřit logiku bez kamery
 function classifyClouds(testSource) {
@@ -948,8 +1061,24 @@ function classifyClouds(testSource) {
     $("hudCloud").textContent = "Oblačnost: v záběru nevidím oblohu";
     return;
   }
-  const cl = cloudLabel(st);
-  $("hudCloud").textContent = "Oblačnost: " + cl.text + " · heuristický odhad";
+  // jasná obloha bez mraků — CCSN dataset (a tedy ani natrénovaný model) nemá třídu
+  // "bez mraků" (všech 11 tříd jsou typy oblačnosti), takže tohle musí odchytit heuristika
+  const looksClear = (st.cloudF + st.darkF) < 0.08 && st.blueF > 0.3;
+  let cl, modelNote;
+  if (looksClear) {
+    cl = { tag: null, text: "jasno, jen ojedinělé mraky" };
+    modelNote = "";
+  } else if (mlModel) {
+    const r = classifyWithModel(clsCanvas);
+    const rainNote = rainNearby && ["Cb", "Ns", "As", "Cs"].includes(r.cls) ? " · v okolí probíhají srážky" : "";
+    cl = { tag: r.cls, text: `${CLOUD_NAMES[r.cls] || r.cls} (${czNum(r.confidence * 100, 0)} %)${rainNote}` };
+    modelNote = " · natrénovaný model (CCSN)";
+  } else {
+    cl = cloudLabelHeuristic(st);
+    modelNote = mlLoadFailed ? " · heuristický odhad (model nedostupný)" : " · heuristický odhad (model se načítá…)";
+    if (!mlLoadFailed) loadMlModel();   // fire-and-forget, projeví se při dalším volání
+  }
+  $("hudCloud").textContent = "Oblačnost: " + cl.text + modelNote;
 
   // ohraničení oblačné oblasti v záběru (buňky rastru s >35 % oblačných pixelů)
   let c0 = COLS, c1 = -1, r0 = ROWS, r1 = -1;
@@ -974,7 +1103,7 @@ function classifyClouds(testSource) {
   tag.querySelector("span").textContent = "☁ " + cl.tag;
   tag.style.display = "block";
 }
-function cloudLabel(st) {
+function cloudLabelHeuristic(st) {
   const total = st.cloudF + st.darkF;
   if (total < 0.08 && st.blueF > 0.3) return { tag: null, text: "jasno, jen ojedinělé mraky" };
   if (st.darkF > 0.30 && st.std < 40 && st.edgeF < 0.02)
@@ -1049,7 +1178,9 @@ window.MR = {
   },
   enterAR, exitAR, classifyClouds, cameraHeading,
   scanFan, buildCurtainBuffer, computeTrend, arFrameLoop, stepStreaks, renderARFrame,
-  _debug: () => ({ curtainPtsLen: curtainPts ? curtainPts.length : 0, streaksLen: streaks.length, hasBuf: !!curtainBuf, rainRAF: !!rainRAF, trendFramePath: S.trendFramePath }),
+  _debug: () => ({ curtainPtsLen: curtainPts ? curtainPts.length : 0, streaksLen: streaks.length, hasBuf: !!curtainBuf, rainRAF: !!rainRAF, trendFrames: S.trendFrames.map(f => f.path) }),
+  computeTrend, linearSlope, nearestRainInfo, trendText,
+  loadMlModel, classifyWithModel, mlStatus: () => ({ loaded: !!mlModel, failed: mlLoadFailed, labels: mlLabels }),
 };
 
 if ("serviceWorker" in navigator) {
@@ -1057,6 +1188,7 @@ if ("serviceWorker" in navigator) {
 }
 
 // ---------- start ----------
+loadMlModel();   // spustit na pozadí hned při startu, ať je model hotový, než uživatel otevře AR
 (async () => {
   $("lat").value = S.lat.toFixed(4); $("lon").value = S.lon.toFixed(4);
   try {
@@ -1070,6 +1202,19 @@ if ("serviceWorker" in navigator) {
   setInterval(async () => {
     try { await loadRadarMeta(); await refresh(); } catch (e) {}
   }, 5 * 60 * 1000);
+
+  // appka se znovu zviditelní (návrat z pozadí / z jiné aplikace) -> vždy natáhnout čerstvý radar
+  let lastResumeRefresh = 0;
+  document.addEventListener("visibilitychange", async () => {
+    if (document.visibilityState !== "visible") return;
+    const now = Date.now();
+    if (now - lastResumeRefresh < 15000) return;   // ochrana proti opakovaným rychlým přepnutím
+    lastResumeRefresh = now;
+    try {
+      await loadRadarMeta();
+      document.body.classList.contains("ar") ? await arUpdate(true) : await refresh();
+    } catch (e) {}
+  });
 })();
 </script>
 </body>

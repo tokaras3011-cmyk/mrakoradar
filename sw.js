@@ -1,5 +1,8 @@
-const CACHE = "mrakoradar-v1";
-const SHELL = ["./", "./index.html", "./manifest.json", "./icon-192.png", "./icon-512.png"];
+const CACHE = "mrakoradar-v3";
+const SHELL = [
+  "./", "./index.html", "./manifest.json", "./icon-192.png", "./icon-512.png",
+  "./model/model.json", "./model/weights.bin", "./model/labels.json",
+];
 
 self.addEventListener("install", e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)));
@@ -11,11 +14,22 @@ self.addEventListener("activate", e => {
   );
   self.clients.claim();
 });
-// appku (shell) servírovat z keše, radarová data vždy ze sítě (musí být čerstvá)
 self.addEventListener("fetch", e => {
   const url = new URL(e.request.url);
   if (url.origin !== location.origin) return;   // dlaždice/API RainViewer necachovat
-  e.respondWith(
-    caches.match(e.request).then(cached => cached || fetch(e.request))
-  );
+
+  // appku samotnou (HTML) vždy nejdřív zkusit ze sítě, ať se po nasazení nové verze
+  // hned projeví — do keše padá jen jako záloha pro offline použití
+  const isAppShell = e.request.mode === "navigate" || url.pathname.endsWith("index.html") || url.pathname.endsWith("/");
+  if (isAppShell) {
+    e.respondWith(
+      fetch(e.request).then(res => {
+        caches.open(CACHE).then(c => c.put(e.request, res.clone()));
+        return res;
+      }).catch(() => caches.match(e.request))
+    );
+    return;
+  }
+  // statické assety (ikony, model) klidně z keše, mění se zřídka
+  e.respondWith(caches.match(e.request).then(cached => cached || fetch(e.request)));
 });
