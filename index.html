@@ -742,8 +742,13 @@ async function buildEchoGrid(framePath) {
 }
 
 // Najde posun (di,dj), při kterém šablona ze středu staršího snímku nejlépe sedí na novější.
-// Vrací i míru důvěryhodnosti: samotné maximum korelace nestačí, u řídkého echa bývá
-// korelační plocha plochá a maximum pak sedne kamkoli (typicky na okraj rozsahu).
+// Dřív jsem tu ještě navíc kontroloval "ostrost" vrcholu korelace (jestli je o dost lepší
+// než okolní posuny) jako pojistku proti falešné shodě. Ukázalo se to jako chyba: u velkého
+// souvislého deštového pásu je korelační plocha ze své podstaty plochá (posun o pár buněk
+// vedle pořád dobře sedí, protože pole vypadá podobně všude okolo) — test proto zahazoval
+// právě ty nejsnáze viditelné, nejjistější případy (rozsáhlý přibližující se systém) a
+// propouštěl naopak jen malé izolované buňky s ostrým vrcholem. Kontrola důvěryhodnosti
+// teď místo toho porovnává dva NEZÁVISLÉ časové odstupy — viz computeMotion().
 function bestShift(gPast, gNow) {
   const C = GRID_N / 2, t0 = C - TEMPL_R, t1 = C + TEMPL_R, side = t1 - t0, n = side * side;
   const tc = new Float32Array(n);
@@ -761,8 +766,6 @@ function bestShift(gPast, gNow) {
   }
   if (varT < 1e-6) return null;   // šablona bez struktury (samá nula) -> korelace nemá smysl
 
-  const W = 2 * SEARCH_R + 1;
-  const surf = new Float32Array(W * W).fill(-2);
   let best = null;
   for (let dj = -SEARCH_R; dj <= SEARCH_R; dj++) {
     for (let di = -SEARCH_R; di <= SEARCH_R; di++) {
@@ -777,21 +780,12 @@ function bestShift(gPast, gNow) {
       const varW = sumWW - sumW * sumW / n;     // Σ(Tc·W) už je kovariance, protože ΣTc = 0
       if (varW < 1e-6) continue;
       const ncc = dot / Math.sqrt(varT * varW);
-      surf[(dj + SEARCH_R) * W + (di + SEARCH_R)] = ncc;
       if (!best || ncc > best.ncc) best = { di, dj, ncc };
     }
   }
   if (!best) return null;
   // maximum na okraji rozsahu = skutečné optimum je nejspíš mimo -> nevěrohodné
   if (Math.abs(best.di) === SEARCH_R || Math.abs(best.dj) === SEARCH_R) return null;
-  // ostrost vrcholu: nejlepší hodnota mimo okolí vrcholu musí být znatelně nižší
-  let second = -2;
-  for (let dj = -SEARCH_R; dj <= SEARCH_R; dj++) for (let di = -SEARCH_R; di <= SEARCH_R; di++) {
-    if (Math.hypot(di - best.di, dj - best.dj) <= 3) continue;
-    const v = surf[(dj + SEARCH_R) * W + (di + SEARCH_R)];
-    if (v > second) second = v;
-  }
-  best.peakRatio = second > 0.01 ? best.ncc / second : Infinity;
   return best;
 }
 
@@ -814,20 +808,34 @@ async function computeMotion() {
   const minCells = GRID_N * GRID_N * 0.01;
   if (now.rainy < minCells) return null;        // v okolí prakticky neprší -> není co sledovat
   const kmPerPx = metersPerPixel(S.lat, S.zoom) / 1000;
-  let best = null;
+  const cands = [];
   for (const f of S.trendFrames) {
     const dtMin = (S.frameTs - f.time) / 60;
     if (dtMin <= 0) continue;
     const past = await buildEchoGrid(f.path);
     if (past.rainy < minCells * 0.5) continue;
     const sh = bestShift(past.g, now.g);
-    if (!sh || sh.ncc < 0.4 || sh.peakRatio < 1.08) continue;   // slabá nebo nevýrazná shoda -> nevěřit
+    if (!sh || sh.ncc < 0.4) continue;          // slabá shoda -> nevěřit
     const cand = motionFromShift(sh.di, sh.dj, dtMin, kmPerPx);
     if (cand.speedKmMin > 2.5) continue;        // >150 km/h -> nejspíš falešná shoda
-    cand.ncc = sh.ncc; cand.peakRatio = sh.peakRatio;
-    if (!best || cand.ncc > best.ncc) best = cand;
+    cand.ncc = sh.ncc;
+    cands.push(cand);
   }
-  return best;
+  if (!cands.length) return null;
+  cands.sort((a, b) => b.ncc - a.ncc);
+  if (cands.length === 1) {
+    // jen jedno nezávislé měření — bez druhého potvrzení musí být samo o sobě přesvědčivé
+    return cands[0].ncc >= 0.55 ? cands[0] : null;
+  }
+  // dva časové odstupy (~15 a ~30 min) měřené nezávisle na sobě: shodují-li se ve směru
+  // i rychlosti, jde o mnohem silnější potvrzení než tvar jedné korelační plochy.
+  const [a, b] = cands;
+  const bothSlow = a.speedKmMin < 0.02 && b.speedKmMin < 0.02;
+  const angleDiff = Math.min(Math.abs(a.bearing - b.bearing), 360 - Math.abs(a.bearing - b.bearing));
+  const speedRatio = Math.max(a.speedKmMin, b.speedKmMin) / Math.max(1e-6, Math.min(a.speedKmMin, b.speedKmMin));
+  const agree = bothSlow || (angleDiff <= 40 && speedRatio <= 2.5);
+  a.agreement = agree;
+  return agree ? a : (a.ncc >= 0.6 ? a : null);
 }
 
 let motionCache = { key: null, value: null };
