@@ -1,7 +1,7 @@
-const CACHE = "mrakoradar-v3";
+const CACHE = "mrakoradar-v4";
 const SHELL = [
   "./", "./index.html", "./manifest.json", "./icon-192.png", "./icon-512.png",
-  "./model/model.json", "./model/weights.bin", "./model/labels.json",
+  "./model/head_model.json", "./model/head_weights.bin", "./model/labels.json",
 ];
 
 self.addEventListener("install", e => {

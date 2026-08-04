@@ -192,7 +192,7 @@
 
 // ---------- stav ----------
 const S = {
-  lat: 50.0755, lon: 14.4378,   // výchozí: Praha (než uživatel dá GPS)
+  lat: 50.2063, lon: 16.0847,   // výchozí: Bolehošť (než uživatel dá GPS)
   az: 0,
   zoom: 7,   // RainViewer servíruje barevné palety max. do zoomu 7
 
@@ -1165,13 +1165,12 @@ function renderMarkers(clusters) {
     : `Ve výhledu (±${HFOV / 2}°) do ${S.maxKm} km neprší.`;
 }
 
-// ---- ML klasifikátor mraků (natrénováno na datasetu CCSN, 2543 snímků, 11 tříd WMO) ----
-// Malá plně propojená síť na ručně navržených příznacích (průměr barvy, textura, hustota hran
-// po 8x8 mřížce) — ne konvoluce ani syrové pixely: trénink na tomto stroji běží na čistě JS
-// CPU backendu (bez GPU/WASM/nativní akcelerace — viz poznámka v ml/train.js) a obojí bylo
-// buď neúnosně pomalé, nebo se nedostatečně učilo. Příznaky se tu v appce musí počítat úplně
-// stejně jako při trénování (viz ml/prepare-data.js), jinak by model dostával jiná data, než
-// na jakých se učil. Pokud se model nenačte, appka spadne zpět na starší heuristiku (cloudLabelHeuristic).
+// ---- ML klasifikátor mraků (transfer learning: MobileNetV2 + dotrénovaná hlava na CCSN) ----
+// MobileNetV2 (předtrénovaný na ImageNetu, načtený přímo z Google TFHub CDN) slouží jako
+// extraktor příznaků — jen dopředný průchod, žádné trénování v appce. Nad jeho 1280rozměrným
+// výstupem běží malá hlava dotrénovaná na 2543 snímcích datasetu CCSN (11 tříd WMO), viz
+// ml/prepare-data-mobilenet.js a ml/train-mobilenet.js. Pokud se model nenačte (offline při
+// prvním použití, nebo výpadek CDN), appka spadne zpět na starší heuristiku (cloudLabelHeuristic).
 const CLOUD_NAMES = {
   Ac: "Altocumulus — vysoká kupovitá oblačnost",
   As: "Altostratus — vysoká vrstevnatá oblačnost",
@@ -1185,14 +1184,17 @@ const CLOUD_NAMES = {
   Sc: "Stratocumulus — kupovitá vrstva",
   St: "Stratus — nízká vrstevnatá oblačnost",
 };
-let mlModel = null, mlLabels = null, mlLoadFailed = false;
+let mobilenetModel = null, mlHead = null, mlLabels = null, mlLoadFailed = false;
 async function loadMlModel() {
-  if (mlModel || mlLoadFailed) return;
+  if (mlHead || mlLoadFailed) return;
   try {
     mlLabels = await (await fetch("model/labels.json")).json();
-    mlModel = await tf.loadLayersModel("model/model.json");
+    [mobilenetModel, mlHead] = await Promise.all([
+      tf.loadGraphModel(mlLabels.mobilenetUrl, { fromTFHub: true }),
+      tf.loadLayersModel("model/head_model.json"),
+    ]);
     const note = $("mlFooterNote");
-    if (note) note.textContent = ` Klasifikace mraků: natrénovaný model (dataset CCSN, 11 tříd WMO, změřená validační přesnost ${czNum(mlLabels.valAccuracy * 100, 0)} % — výrazně nad náhodou (~9 %), ale ne spolehlivá na první pohled u vizuálně podobných typů).`;
+    if (note) note.textContent = ` Klasifikace mraků: MobileNetV2 (ImageNet) + dotrénovaná hlava na datasetu CCSN, 11 tříd WMO, změřená validační přesnost ${czNum(mlLabels.valAccuracy * 100, 0)} % — výrazně nad náhodou (~9 %), u nejbližší dešťové buňky doladěno podle radaru (viz níže).`;
   } catch (e) {
     mlLoadFailed = true;
     console.warn("ML model se nepodařilo načíst, používám heuristiku:", e.message);
@@ -1200,45 +1202,64 @@ async function loadMlModel() {
 }
 const mlFeatCanvas = document.createElement("canvas");
 const mlFeatCtx = mlFeatCanvas.getContext("2d", { willReadFrequently: true });
-// stejný výpočet příznaků jako ml/prepare-data.js: extractFeatures() — musí sedět 1:1
-function extractFeaturesFromCanvas(src, work, grid) {
-  mlFeatCanvas.width = work; mlFeatCanvas.height = work;
-  mlFeatCtx.drawImage(src, 0, 0, work, work);
-  const px = mlFeatCtx.getImageData(0, 0, work, work).data;   // RGBA 0..255
-  const cell = work / grid;
-  const lum = new Float32Array(work * work);
-  for (let i = 0; i < work * work; i++)
-    lum[i] = 0.299 * (px[i * 4] / 255) + 0.587 * (px[i * 4 + 1] / 255) + 0.114 * (px[i * 4 + 2] / 255);
-  const feats = [];
-  for (let gy = 0; gy < grid; gy++) {
-    for (let gx = 0; gx < grid; gx++) {
-      let sumR = 0, sumG = 0, sumB = 0, sumL = 0, sumL2 = 0, edgeSum = 0, n = 0;
-      for (let y = gy * cell; y < (gy + 1) * cell; y++) {
-        for (let x = gx * cell; x < (gx + 1) * cell; x++) {
-          const i = y * work + x;
-          sumR += px[i * 4] / 255; sumG += px[i * 4 + 1] / 255; sumB += px[i * 4 + 2] / 255;
-          sumL += lum[i]; sumL2 += lum[i] * lum[i];
-          if (x < work - 1) edgeSum += Math.abs(lum[i + 1] - lum[i]);
-          if (y < work - 1) edgeSum += Math.abs(lum[i + work] - lum[i]);
-          n++;
-        }
-      }
-      const meanL = sumL / n, varL = Math.max(0, sumL2 / n - meanL * meanL);
-      feats.push(sumR / n, sumG / n, sumB / n, Math.sqrt(varL), edgeSum / (2 * n));
-    }
+// vrátí pravděpodobnosti pro všechny třídy (ne jen nejlepší) — radarové doladění je potřebuje
+// upravit ještě před výběrem vítěze
+function classifyRaw(canvas) {
+  const size = mlLabels.inputSize;
+  mlFeatCanvas.width = size; mlFeatCanvas.height = size;
+  mlFeatCtx.drawImage(canvas, 0, 0, size, size);
+  const px = mlFeatCtx.getImageData(0, 0, size, size).data;   // RGBA 0..255
+  const rgb = new Float32Array(size * size * 3);
+  for (let i = 0; i < size * size; i++) {
+    rgb[i * 3] = px[i * 4] / 255; rgb[i * 3 + 1] = px[i * 4 + 1] / 255; rgb[i * 3 + 2] = px[i * 4 + 2] / 255;
   }
-  return feats;
+  return tf.tidy(() => {
+    const img = tf.tensor4d(rgb, [1, size, size, 3]);
+    const embedding = mobilenetModel.predict(img);
+    const { mean, std } = mlLabels.norm;
+    const normed = tf.div(tf.sub(embedding, tf.tensor1d(mean)), tf.tensor1d(std));
+    return mlHead.predict(normed).dataSync().slice();
+  });
+}
+
+// ---- radarové doladění: u dvojic tříd, které WMO definuje mj. tím, jestli prší, foto
+// samo nerozhodne — radar ve směru pohledu ano. Jen jemný posun pravděpodobnosti, ne přepis.
+function radarContextForAzimuth() {
+  if (!lastClusters || !lastClusters.length) return { raining: false, maxRate: 0 };
+  // zajímá nás jen srážky blízko středu záběru (ne kdekoli v celém vějíři ±30°)
+  const near = lastClusters.filter(c => {
+    const mid = c.offs.reduce((a, b) => a + b, 0) / c.offs.length;
+    return Math.abs(mid) <= 15 && c.from <= 25;
+  });
+  if (!near.length) return { raining: false, maxRate: 0 };
+  return { raining: true, maxRate: Math.max(...near.map(c => c.maxRate)) };
+}
+function applyRadarPrior(probs, classes) {
+  const ctx = radarContextForAzimuth();
+  const idx = name => classes.indexOf(name);
+  const out = probs.slice();
+  function nudge(clsRain, clsDry, factorTowardRain) {
+    const iR = idx(clsRain), iD = idx(clsDry);
+    if (iR < 0 || iD < 0) return;
+    out[iR] *= factorTowardRain; out[iD] *= (2 - factorTowardRain);
+  }
+  // Ns (vytrvale prší) vs. As (obvykle ne) — nejčastější vizuální záměna v matici záměn
+  nudge("Ns", "As", ctx.raining ? 1.35 : 0.75);
+  // Cb (bouřka, silná konvekce) vs. Cu (kupa pěkného počasí, neprší)
+  nudge("Cb", "Cu", ctx.raining && ctx.maxRate >= 5 ? 1.4 : (ctx.raining ? 1.1 : 0.75));
+  const sum = out.reduce((a, b) => a + b, 0);
+  return sum > 0 ? out.map(v => v / sum) : out;
 }
 function classifyWithModel(canvas) {
-  const feats = extractFeaturesFromCanvas(canvas, mlLabels.work, mlLabels.grid);
-  const { mean, std } = mlLabels.norm;
-  const normed = feats.map((v, i) => (v - mean[i]) / std[i]);
-  return tf.tidy(() => {
-    const probs = mlModel.predict(tf.tensor2d([normed])).dataSync();
-    let best = 0;
-    for (let i = 1; i < probs.length; i++) if (probs[i] > probs[best]) best = i;
-    return { cls: mlLabels.classes[best], confidence: probs[best] };
-  });
+  const raw = classifyRaw(canvas);
+  const adjusted = applyRadarPrior(raw, mlLabels.classes);
+  let bestRaw = 0, bestAdj = 0;
+  for (let i = 1; i < raw.length; i++) if (raw[i] > raw[bestRaw]) bestRaw = i;
+  for (let i = 1; i < adjusted.length; i++) if (adjusted[i] > adjusted[bestAdj]) bestAdj = i;
+  return {
+    cls: mlLabels.classes[bestAdj], confidence: adjusted[bestAdj],
+    radarChanged: bestAdj !== bestRaw,
+  };
 }
 
 // hrubá klasifikace oblačnosti z obrazu kamery (heuristika, ne ML);
@@ -1310,11 +1331,11 @@ function classifyClouds(testSource) {
   if (looksClear) {
     cl = { tag: null, text: "jasno, jen ojedinělé mraky" };
     modelNote = "";
-  } else if (mlModel) {
+  } else if (mlHead) {
     const r = classifyWithModel(clsCanvas);
-    const rainNote = rainNearby && ["Cb", "Ns", "As", "Cs"].includes(r.cls) ? " · v okolí probíhají srážky" : "";
+    const rainNote = r.radarChanged ? " · doladěno podle radaru ve směru pohledu" : "";
     cl = { tag: r.cls, text: `${CLOUD_NAMES[r.cls] || r.cls} (${czNum(r.confidence * 100, 0)} %)${rainNote}` };
-    modelNote = " · natrénovaný model (CCSN)";
+    modelNote = " · natrénovaný model (MobileNet + CCSN)";
   } else {
     cl = cloudLabelHeuristic(st);
     modelNote = mlLoadFailed ? " · heuristický odhad (model nedostupný)" : " · heuristický odhad (model se načítá…)";
@@ -1439,7 +1460,8 @@ window.MR = {
   _debug: () => ({ curtainPtsLen: curtainPts ? curtainPts.length : 0, streaksLen: streaks.length, hasBuf: !!curtainBuf, rainRAF: !!rainRAF, trendFrames: S.trendFrames.map(f => f.path) }),
   computeMotion, ensureMotion, buildEchoGrid, bestShift, motionFromShift, nowcastAtUser, cellTrendFor, trendText,
   loadWeather, ensureWeather, cloudBaseKm, isSnow, updateUserPanel,
-  loadMlModel, classifyWithModel, mlStatus: () => ({ loaded: !!mlModel, failed: mlLoadFailed, labels: mlLabels }),
+  loadMlModel, classifyWithModel, classifyRaw, applyRadarPrior, radarContextForAzimuth,
+  mlStatus: () => ({ loaded: !!mlHead, failed: mlLoadFailed, labels: mlLabels }),
 };
 
 if ("serviceWorker" in navigator) {
@@ -1453,7 +1475,7 @@ loadMlModel();   // spustit na pozadí hned při startu, ať je model hotový, n
   try {
     await loadRadarMeta();
     await refresh();
-    setStatus("Výchozí poloha: Praha. Tlačítkem 📍 GPS použijete skutečnou polohu.");
+    setStatus("Výchozí poloha: Bolehošť. Tlačítkem 📍 GPS použijete skutečnou polohu.");
   } catch (err) {
     $("mainMsg").textContent = "Radar se nepodařilo načíst.";
     setStatus(err.message);
